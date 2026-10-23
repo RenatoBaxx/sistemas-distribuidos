@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// Formato unico das mensagens trocadas entre bots, servidores e servicos.
+// Os componentes em C# e em Python usam este mesmo arquivo.
+message Mensagem {
+  string tipo = 1;            // login, criar_canal, listar_canais...
+  string remetente = 2;       // nome de quem enviou
+  int64 timestamp = 3;        // hora do envio em milissegundos (unix)
+  int64 relogio = 4;          // relogio logico (vai ser usado na parte 3)
+  string status = 5;          // "ok" ou "erro" nas respostas
+  string erro = 6;            // descricao do erro quando status = "erro"
+  string canal = 7;           // nome do canal
+  string conteudo = 8;        // texto da mensagem (parte 2)
+  repeated string canais = 9; // lista de canais
+}

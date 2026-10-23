@@ -1,0 +1,11 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir pyzmq==27.2.0
+
+COPY broker.py .
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "broker.py"]

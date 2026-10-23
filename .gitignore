@@ -1,0 +1,13 @@
+# dados salvos pelos servidores
+dados/
+
+# python
+__pycache__/
+*_pb2.py
+
+# c#
+bin/
+obj/
+
+.DS_Store
+.vscode/
