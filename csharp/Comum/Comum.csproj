@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NetMQ" Version="4.0.4.5" />
+    <PackageReference Include="Google.Protobuf" Version="3.36.2" />
+    <PackageReference Include="Grpc.Tools" Version="2.84.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <!-- gera a classe Mensagem a partir do mesmo .proto usado pelo Python -->
+  <ItemGroup>
+    <Protobuf Include="../../proto/mensagem.proto" ProtoRoot="../../proto" GrpcServices="None" />
+  </ItemGroup>
+
+</Project>

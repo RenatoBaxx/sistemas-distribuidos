@@ -1,3 +1,29 @@
 services:
   broker:
     build: ./broker
+
+  servidor-cs-1:
+    build:
+      context: .
+      dockerfile: csharp/Dockerfile
+    image: sd-csharp
+    command: dotnet servidor/Servidor.dll
+    environment:
+      - NOME=servidor-cs-1
+    volumes:
+      - ./dados/servidor-cs-1:/app/dados
+    depends_on:
+      - broker
+
+  servidor-cs-2:
+    build:
+      context: .
+      dockerfile: csharp/Dockerfile
+    image: sd-csharp
+    command: dotnet servidor/Servidor.dll
+    environment:
+      - NOME=servidor-cs-2
+    volumes:
+      - ./dados/servidor-cs-2:/app/dados
+    depends_on:
+      - broker
