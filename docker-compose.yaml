@@ -27,3 +27,29 @@ services:
       - ./dados/servidor-cs-2:/app/dados
     depends_on:
       - broker
+
+  servidor-py-1:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    image: sd-python
+    command: python servidor.py
+    environment:
+      - NOME=servidor-py-1
+    volumes:
+      - ./dados/servidor-py-1:/app/dados
+    depends_on:
+      - broker
+
+  servidor-py-2:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    image: sd-python
+    command: python servidor.py
+    environment:
+      - NOME=servidor-py-2
+    volumes:
+      - ./dados/servidor-py-2:/app/dados
+    depends_on:
+      - broker
