@@ -53,3 +53,25 @@ services:
       - ./dados/servidor-py-2:/app/dados
     depends_on:
       - broker
+
+  bot-cs-1:
+    build:
+      context: .
+      dockerfile: csharp/Dockerfile
+    image: sd-csharp
+    command: dotnet cliente/Cliente.dll
+    environment:
+      - NOME=bot-cs-1
+    depends_on:
+      - broker
+
+  bot-cs-2:
+    build:
+      context: .
+      dockerfile: csharp/Dockerfile
+    image: sd-csharp
+    command: dotnet cliente/Cliente.dll
+    environment:
+      - NOME=bot-cs-2
+    depends_on:
+      - broker

@@ -1,5 +1,6 @@
 using Google.Protobuf;
 using NetMQ;
+using NetMQ.Sockets;
 
 // envio e recebimento da Mensagem (protobuf) pelos sockets do NetMQ
 public static class Net
@@ -21,5 +22,18 @@ public static class Net
         var m = Mensagem.Parser.ParseFrom(bytes);
         Log.Received(m);
         return m;
+    }
+
+    // usa um REQ novo para cada pedido; se ninguem responder a tempo devolve null
+    public static Mensagem? Request(string address, Mensagem m, TimeSpan timeout)
+    {
+        using var socket = new RequestSocket();
+        socket.Options.Linger = TimeSpan.Zero;
+        socket.Connect(address);
+        Send(socket, m);
+
+        if (socket.TryReceiveFrameBytes(timeout, out var bytes))
+            return Read(bytes);
+        return null;
     }
 }
