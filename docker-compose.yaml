@@ -75,3 +75,25 @@ services:
       - NOME=bot-cs-2
     depends_on:
       - broker
+
+  bot-py-1:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    image: sd-python
+    command: python cliente.py
+    environment:
+      - NOME=bot-py-1
+    depends_on:
+      - broker
+
+  bot-py-2:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    image: sd-python
+    command: python cliente.py
+    environment:
+      - NOME=bot-py-2
+    depends_on:
+      - broker
