@@ -26,6 +26,11 @@ public class Storage
         Append("canais.jsonl", new ChannelRecord(channel, createdBy, timestamp));
     }
 
+    public void SaveMessage(string channel, string user, string text, long timestamp)
+    {
+        Append("mensagens.jsonl", new MessageRecord(channel, user, text, timestamp));
+    }
+
     public List<string> LoadChannels()
     {
         var path = Path.Combine(folder, "canais.jsonl");
@@ -46,3 +51,4 @@ public class Storage
 
 public record LoginRecord(string Usuario, long Timestamp);
 public record ChannelRecord(string Canal, string CriadoPor, long Timestamp);
+public record MessageRecord(string Canal, string Usuario, string Conteudo, long Timestamp);

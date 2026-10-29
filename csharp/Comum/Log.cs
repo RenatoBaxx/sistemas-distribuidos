@@ -30,6 +30,8 @@ public static class Log
             sb.Append($" | erro: {m.Erro}");
         if (m.Canal != "")
             sb.Append($" | canal: {m.Canal}");
+        if (m.Conteudo != "")
+            sb.Append($" | texto: {m.Conteudo}");
         if (m.Canais.Count > 0)
             sb.Append($" | canais: [{string.Join(", ", m.Canais)}]");
         return sb.ToString();

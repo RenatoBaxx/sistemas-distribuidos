@@ -9,6 +9,9 @@ public class ChatServer
     // pedidos dos bots (chegam pelo broker)
     private readonly ResponseSocket clients = new ResponseSocket();
 
+    // mensagens publicadas nos canais (vao para o proxy)
+    private readonly PublisherSocket publisher = new PublisherSocket();
+
     public ChatServer(string name)
     {
         this.name = name;
@@ -18,6 +21,7 @@ public class ChatServer
 
     public void Run()
     {
+        publisher.Connect("tcp://proxy:5557");
         clients.Connect("tcp://broker:5556");
         Log.Info("conectado no broker, esperando pedidos...");
 
@@ -39,6 +43,7 @@ public class ChatServer
             "login" => Login(request),
             "criar_canal" => CreateChannel(request),
             "listar_canais" => ListChannels(),
+            "publicar" => Publish(request),
             _ => Error(request.Tipo, "nao conheco esse tipo de mensagem"),
         };
     }
@@ -75,6 +80,30 @@ public class ChatServer
     {
         var reply = Ok("listar_canais");
         reply.Canais.AddRange(channels);
+        return reply;
+    }
+
+    // nao confere se o canal esta na lista porque, com o round-robin, cada servidor so conhece parte dos canais
+    private Mensagem Publish(Mensagem request)
+    {
+        if (!IsValidName(request.Canal) || request.Canal == "servers")
+            return Error("publicar", "nome de canal invalido");
+        if (string.IsNullOrWhiteSpace(request.Conteudo))
+            return Error("publicar", "a mensagem esta vazia");
+
+        // na publicacao o remetente e o bot que escreveu
+        var post = new Mensagem
+        {
+            Tipo = "publicacao",
+            Remetente = request.Remetente,
+            Canal = request.Canal,
+            Conteudo = request.Conteudo
+        };
+        Net.Publish(publisher, request.Canal, post);
+        storage.SaveMessage(request.Canal, request.Remetente, request.Conteudo, request.Timestamp);
+
+        var reply = Ok("publicar");
+        reply.Canal = request.Canal;
         return reply;
     }
 

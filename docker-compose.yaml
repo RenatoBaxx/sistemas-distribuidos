@@ -2,6 +2,11 @@ services:
   broker:
     build: ./broker
 
+  proxy:
+    build:
+      context: .
+      dockerfile: proxy/Dockerfile
+
   servidor-cs-1:
     build:
       context: .
@@ -14,6 +19,7 @@ services:
       - ./dados/servidor-cs-1:/app/dados
     depends_on:
       - broker
+      - proxy
 
   servidor-cs-2:
     build:
@@ -27,6 +33,7 @@ services:
       - ./dados/servidor-cs-2:/app/dados
     depends_on:
       - broker
+      - proxy
 
   servidor-py-1:
     build:
