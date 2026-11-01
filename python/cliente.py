@@ -13,8 +13,27 @@ ESPERA_RESPOSTA = 5000  # ms
 # canais que o bot pode criar
 SUGESTOES_DE_CANAL = ["geral", "jogos", "musica", "filmes", "esportes", "noticias", "tecnologia", "memes"]
 
+# frases sorteadas para mandar nos canais
+FRASES = [
+    "oi pessoal",
+    "alguem ai?",
+    "bom dia!",
+    "boa noite galera",
+    "testando o canal",
+    "o zeromq ta funcionando",
+    "mensagem aleatoria",
+    "sistemas distribuidos e legal",
+    "quem vai na aula amanha?",
+    "kkkkkk",
+]
+
 contexto = zmq.Context()
 req = None
+
+# socket que recebe as mensagens dos canais em que o bot entrou
+sub = contexto.socket(zmq.SUB)
+poller = zmq.Poller()
+inscrito_em = []
 
 
 def hora_atual():
@@ -27,7 +46,7 @@ def hora_legivel(ms):
 
 def mostrar(acao, msg):
     partes = [f"tipo={msg.tipo}", f"remetente={msg.remetente}", f"timestamp={hora_legivel(msg.timestamp)}"]
-    for campo in ["status", "erro", "canal"]:
+    for campo in ["status", "erro", "canal", "conteudo"]:
         valor = getattr(msg, campo)
         if valor:
             partes.append(f"{campo}={valor}")
@@ -86,15 +105,67 @@ def criar_canal(existentes):
         print(f"[{NOME}] nao criou o canal: {resposta.erro}")
 
 
+def entrar_em_um_canal(existentes):
+    opcoes = [c for c in existentes if c not in inscrito_em]
+    if not opcoes:
+        return
+    canal = random.choice(opcoes)
+    sub.setsockopt_string(zmq.SUBSCRIBE, canal)
+    inscrito_em.append(canal)
+    print(f"[{NOME}] agora estou inscrito em: {', '.join(inscrito_em)}")
+
+
+def publicar(canal):
+    resposta = pedir("publicar", canal=canal, conteudo=random.choice(FRASES))
+    if resposta is not None and resposta.status == "erro":
+        print(f"[{NOME}] nao publicou no canal {canal}: {resposta.erro}")
+
+
+# fica ouvindo os canais durante alguns segundos (faz o papel do sleep)
+def ouvir_canais(segundos):
+    limite = time.monotonic() + segundos
+    while True:
+        restante = limite - time.monotonic()
+        if restante <= 0:
+            break
+        eventos = dict(poller.poll(int(restante * 1000)))
+        if sub not in eventos:
+            continue
+
+        topico, dados = sub.recv_multipart()
+        # o filtro do zeromq e por prefixo, entao confere o nome inteiro do canal
+        if topico.decode() not in inscrito_em:
+            continue
+        msg = mensagem_pb2.Mensagem.FromString(dados)
+        print(f"[{NOME}] MENSAGEM NO CANAL: canal={msg.canal} | de={msg.remetente} | conteudo={msg.conteudo} | enviada={hora_legivel(msg.timestamp)} | recebida={hora_legivel(hora_atual())}")
+
+
 def main():
     conectar()
+    sub.connect("tcp://proxy:5558")
+    poller.register(sub, zmq.POLLIN)
     fazer_login()
 
     while True:
         existentes = canais_existentes()
+
+        # regra 1: se tiver menos de 5 canais, cria outro
         if len(existentes) < 5:
             criar_canal(existentes)
-        time.sleep(3)
+            existentes = canais_existentes()
+
+        # regra 2: se estiver em menos de 3 canais, entra em mais um
+        if len(inscrito_em) < 3:
+            entrar_em_um_canal(existentes)
+
+        # regra 3: escolhe um canal e manda 10 mensagens, uma por segundo
+        if not existentes:
+            ouvir_canais(1)
+            continue
+        canal = random.choice(existentes)
+        for _ in range(10):
+            publicar(canal)
+            ouvir_canais(1)
 
 
 if __name__ == "__main__":

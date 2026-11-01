@@ -47,6 +47,7 @@ services:
       - ./dados/servidor-py-1:/app/dados
     depends_on:
       - broker
+      - proxy
 
   servidor-py-2:
     build:
@@ -60,6 +61,7 @@ services:
       - ./dados/servidor-py-2:/app/dados
     depends_on:
       - broker
+      - proxy
 
   bot-cs-1:
     build:
@@ -93,6 +95,7 @@ services:
       - NOME=bot-py-1
     depends_on:
       - broker
+      - proxy
 
   bot-py-2:
     build:
@@ -104,3 +107,4 @@ services:
       - NOME=bot-py-2
     depends_on:
       - broker
+      - proxy

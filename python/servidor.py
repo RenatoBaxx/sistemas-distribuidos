@@ -15,6 +15,7 @@ NOME_VALIDO = re.compile(r"[a-z0-9_-]{1,20}")
 
 contexto = zmq.Context()
 socket_bots = contexto.socket(zmq.REP)
+pub = contexto.socket(zmq.PUB)  # publicacoes nos canais (vai para o proxy)
 
 canais = []
 
@@ -29,7 +30,7 @@ def hora_legivel(ms):
 
 def mostrar(acao, msg):
     partes = [f"tipo={msg.tipo}", f"remetente={msg.remetente}", f"timestamp={hora_legivel(msg.timestamp)}"]
-    for campo in ["status", "erro", "canal"]:
+    for campo in ["status", "erro", "canal", "conteudo"]:
         valor = getattr(msg, campo)
         if valor:
             partes.append(f"{campo}={valor}")
@@ -108,10 +109,33 @@ def listar_canais(pedido):
     return responder("listar_canais", canais=canais)
 
 
+# nao confere se o canal existe aqui porque, com o round-robin, cada servidor so conhece parte dos canais
+def publicar(pedido):
+    if not NOME_VALIDO.fullmatch(pedido.canal) or pedido.canal == "servers":
+        return responder("publicar", erro="canal invalido")
+    if not pedido.conteudo.strip():
+        return responder("publicar", erro="mensagem vazia")
+
+    # o remetente da publicacao e o bot que escreveu a mensagem
+    publicacao = mensagem_pb2.Mensagem(
+        tipo="publicacao",
+        remetente=pedido.remetente,
+        timestamp=hora_atual(),
+        canal=pedido.canal,
+        conteudo=pedido.conteudo,
+    )
+    mostrar("PUBLICADO", publicacao)
+    pub.send_multipart([pedido.canal.encode(), publicacao.SerializeToString()])
+
+    guardar("mensagens.jsonl", canal=pedido.canal, usuario=pedido.remetente, conteudo=pedido.conteudo, timestamp=pedido.timestamp)
+    return responder("publicar", canal=pedido.canal)
+
+
 TRATADORES = {
     "login": fazer_login,
     "criar_canal": criar_canal,
     "listar_canais": listar_canais,
+    "publicar": publicar,
 }
 
 
@@ -126,6 +150,7 @@ def main():
     os.makedirs(PASTA_DADOS, exist_ok=True)
     carregar_canais()
 
+    pub.connect("tcp://proxy:5557")
     socket_bots.connect("tcp://broker:5556")
     print(f"[{NOME}] esperando pedidos do broker...")
 
