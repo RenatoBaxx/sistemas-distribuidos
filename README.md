@@ -31,8 +31,9 @@ Cada integrante fez um bot (cliente) e um servidor na sua linguagem:
 | C# (.NET 10) | NetMQ | `csharp/Servidor`, `csharp/Cliente` e `csharp/Comum` |
 | Python 3.12 | pyzmq | `python/servidor.py` e `python/cliente.py` |
 
-O broker foi feito em Python (`broker/broker.py`). Qualquer bot conversa com qualquer
-servidor, porque o broker não sabe a linguagem de ninguém, ele só repassa as mensagens.
+O broker foi feito em Python (`broker/broker.py`) e o proxy do Pub/Sub em C# (`proxy/`).
+Qualquer bot conversa com qualquer servidor, porque o broker e o proxy não sabem a
+linguagem de ninguém, eles só repassam as mensagens.
 
 ### Serialização: Protobuf
 
@@ -48,14 +49,14 @@ A resposta sempre usa o mesmo `tipo` do pedido.
 
 | Campo | Tipo | Para que serve |
 |---|---|---|
-| tipo | string | `login`, `criar_canal`, `listar_canais` |
+| tipo | string | `login`, `criar_canal`, `listar_canais`, `publicar`, `publicacao` |
 | remetente | string | nome de quem enviou (bot ou servidor) |
 | timestamp | int64 | hora do envio em milissegundos (unix) |
 | relogio | int64 | relógio lógico (vai ser usado na parte 3) |
 | status | string | `ok` ou `erro` nas respostas |
 | erro | string | descrição do erro |
 | canal | string | nome do canal |
-| conteudo | string | texto da mensagem (vai ser usado na parte 2) |
+| conteudo | string | texto da mensagem |
 | canais | lista de string | lista de canais |
 
 ### Persistência
@@ -66,6 +67,7 @@ têm um registro por linha em JSON (JSON Lines):
 
 - `logins.jsonl`: todos os logins (usuário e timestamp)
 - `canais.jsonl`: canais criados (nome, quem criou e timestamp)
+- `mensagens.jsonl`: mensagens publicadas (canal, usuário, texto e timestamp do envio)
 
 Quando o servidor inicia ele lê o `canais.jsonl` para recuperar os canais.
 
@@ -76,10 +78,14 @@ Quando o servidor inicia ele lê o `canais.jsonl` para recuperar os canais.
 
 ```
 bots (REQ) ---> broker (ROUTER 5555 | DEALER 5556) ---> servidores (REP)
+servidores (PUB) ---> proxy (XSUB 5557 | XPUB 5558) ---> bots (SUB)
 ```
 
 Os bots se conectam na porta 5555 do broker e os servidores na 5556. O broker distribui os
 pedidos entre os 4 servidores usando round-robin.
+
+Para as mensagens dos canais existe um proxy separado: os servidores publicam na porta
+5557 e os bots assinam na porta 5558.
 
 ### Login
 
@@ -91,8 +97,45 @@ O bot manda `login` com o seu nome no campo `remetente` e o servidor responde `o
 - `criar_canal`: o bot manda o nome no campo `canal` e o servidor responde `ok` ou `erro`.
 - `listar_canais`: o servidor responde com a lista no campo `canais`.
 
-O bot lista os canais a cada 3 segundos e, se existirem menos de 5, cria um novo com um
-nome sorteado de uma lista fixa.
+### Publicação nos canais (Pub/Sub)
+
+O nome do canal é o tópico do Pub/Sub. Para publicar, o bot faz um pedido `publicar` ao
+servidor (pelo broker) com o canal e o texto. O servidor publica no proxy e responde `ok`
+ou `erro` para o bot:
+
+```
+bot      -> servidor : REQ publicar (canal, conteudo)
+servidor -> proxy    : PUB [canal] publicacao
+servidor -> bot      : REP ok/erro
+```
+
+A publicação tem 2 partes (frames): a primeira é o nome do canal, porque o ZeroMQ usa o
+começo da mensagem para filtrar o tópico, e a segunda é a `Mensagem` em Protobuf com
+`tipo = publicacao`. Na publicação o `remetente` é o bot que escreveu a mensagem, para
+quem recebe saber quem mandou.
+
+O servidor não confere se o canal existe na lista dele, só se o nome é válido, porque com
+o round-robin cada servidor só conhece uma parte dos canais (ver a observação no final).
+
+Quando chega uma mensagem de um canal em que o bot está inscrito, ele mostra o canal, quem
+mandou, o texto, a hora do envio e a hora do recebimento. Cada bot mostra do seu jeito:
+
+```
+[bot-py-1] MENSAGEM NO CANAL: canal=geral | de=bot-cs-2 | conteudo=bom dia! | enviada=00:57:36.461 | recebida=00:57:36.478
+[bot-cs-1] #geral <bot-py-2> bom dia!  (enviada 00:42:32.577, recebida 00:42:32.578)
+```
+
+### Roteiro dos bots
+
+Depois do login, o bot fica em um loop infinito fazendo:
+
+1. lista os canais e, se existirem menos de 5, cria um novo;
+2. se estiver inscrito em menos de 3 canais, se inscreve em mais um (sorteado da lista);
+3. escolhe um canal da lista e manda 10 mensagens aleatórias, uma a cada 1 segundo.
+
+Os passos 1 e 2 são feitos a cada volta do loop (e não só uma vez), assim o bot vai se
+inscrevendo aos poucos até chegar em 3 canais. Enquanto espera o 1 segundo entre as
+mensagens, o bot fica lendo o socket SUB e mostrando o que chegou, sem precisar de thread.
 
 ### Erros tratados
 
@@ -100,6 +143,7 @@ nome sorteado de uma lista fixa.
 |---|---|
 | login | nome vazio, com mais de 20 caracteres ou com caracteres fora de `a-z`, `0-9`, `-` e `_` |
 | criar_canal | nome inválido (mesma regra do login), canal que já existe ou o nome `servers` (reservado para a parte 4) |
+| publicar | nome de canal inválido, canal `servers` ou mensagem vazia |
 | outro tipo | `tipo de mensagem desconhecido` |
 
 Login repetido é aceito, só fica registrado de novo no arquivo.
@@ -121,6 +165,7 @@ parte 5 (replicação).
 ```
 proto/mensagem.proto    formato das mensagens
 broker/                 broker req/rep (Python)
+proxy/                  proxy pub/sub (C#)
 csharp/Comum/           código usado pelo servidor e pelo bot em C# (Mensagem, log e envio)
 csharp/Servidor/        servidor em C#
 csharp/Cliente/         bot em C#
@@ -128,5 +173,5 @@ csharp/Dockerfile       imagem dos programas em C#
 python/servidor.py      servidor em Python
 python/cliente.py       bot em Python
 python/Dockerfile       imagem dos programas em Python
-docker-compose.yaml     sobe o broker, 4 servidores e 4 bots
+docker-compose.yaml     sobe o broker, o proxy, 4 servidores e 4 bots
 ```
