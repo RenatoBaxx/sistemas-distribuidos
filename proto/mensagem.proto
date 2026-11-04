@@ -12,4 +12,14 @@ message Mensagem {
   string canal = 7;           // nome do canal
   string conteudo = 8;        // texto da mensagem (parte 2)
   repeated string canais = 9; // lista de canais
+
+  // parte 3 (servico de referencia)
+  int32 rank = 10;                       // rank do servidor
+  repeated InfoServidor servidores = 11; // servidores disponiveis
+  int64 hora = 12;                       // hora usada para acertar o relogio fisico
+}
+
+message InfoServidor {
+  string nome = 1;
+  int32 rank = 2;
 }

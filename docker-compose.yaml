@@ -7,6 +7,11 @@ services:
       context: .
       dockerfile: proxy/Dockerfile
 
+  referencia:
+    build:
+      context: .
+      dockerfile: referencia/Dockerfile
+
   servidor-cs-1:
     build:
       context: .
