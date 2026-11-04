@@ -145,7 +145,8 @@ public class Bot
                 continue;
 
             var m = Mensagem.Parser.ParseFrom(bytes);
-            Log.Info($"#{m.Canal} <{m.Remetente}> {m.Conteudo}  (enviada {Clock.Format(m.Timestamp)}, recebida {Clock.Format(Clock.Now())})");
+            Clock.Update(m.Relogio);
+            Log.Info($"#{m.Canal} <{m.Remetente}> {m.Conteudo}  (enviada {Clock.Format(m.Timestamp)}, recebida {Clock.Format(Clock.Now())}, lamport {m.Relogio})");
         }
     }
 

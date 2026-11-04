@@ -2,9 +2,15 @@ using NetMQ.Sockets;
 
 public class ChatServer
 {
+    private const string ReferenceAddress = "tcp://referencia:5559";
+    private static readonly TimeSpan ReferenceTimeout = TimeSpan.FromSeconds(2);
+
     private readonly string name;
     private readonly Storage storage = new Storage("dados");
     private readonly List<string> channels;
+
+    private int rank;
+    private int clientMessages = 0;
 
     // pedidos dos bots (chegam pelo broker)
     private readonly ResponseSocket clients = new ResponseSocket();
@@ -21,7 +27,16 @@ public class ChatServer
 
     public void Run()
     {
+        // todos os containers usam o relogio do mesmo computador, entao cada servidor
+        // comeca com um erro aleatorio para dar para ver a sincronizacao funcionando
+        var drift = new Random().Next(-3000, 3001);
+        Clock.Adjust(drift);
+        Log.Info($"relogio fisico comecando com {drift} ms de diferenca");
+
         publisher.Connect("tcp://proxy:5557");
+        AskRank();
+        ShowServers();
+
         clients.Connect("tcp://broker:5556");
         Log.Info("conectado no broker, esperando pedidos...");
 
@@ -34,7 +49,66 @@ public class ChatServer
         var request = Net.Receive(clients);
         var reply = Handle(request);
         Net.Send(clients, reply);
+
+        clientMessages++;
+        if (clientMessages % 10 == 0)
+            SendHeartbeat();
     }
+
+    // ---------------- servico de referencia ----------------
+
+    private void AskRank()
+    {
+        while (true)
+        {
+            var reply = Net.Request(ReferenceAddress, NewMessage("rank"), ReferenceTimeout);
+            if (reply?.Status == "ok")
+            {
+                rank = reply.Rank;
+                Log.Info($"meu rank e {rank}");
+                return;
+            }
+            Log.Info("a referencia nao respondeu, tentando de novo...");
+            Thread.Sleep(1000);
+        }
+    }
+
+    private List<InfoServidor> GetServers()
+    {
+        var reply = Net.Request(ReferenceAddress, NewMessage("listar_servidores"), ReferenceTimeout);
+        if (reply == null || reply.Status != "ok")
+            return new List<InfoServidor>();
+        return reply.Servidores.ToList();
+    }
+
+    private void ShowServers()
+    {
+        var list = GetServers().Select(s => $"{s.Nome} (rank {s.Rank})");
+        Log.Info($"servidores disponiveis: {string.Join(", ", list)}");
+    }
+
+    private void SendHeartbeat()
+    {
+        var reply = Net.Request(ReferenceAddress, NewMessage("heartbeat"), ReferenceTimeout);
+        if (reply == null)
+        {
+            Log.Info("a referencia nao respondeu o heartbeat");
+            return;
+        }
+        if (reply.Status == "erro")
+        {
+            // a referencia reiniciou e nao conhece mais este servidor
+            AskRank();
+            return;
+        }
+
+        // a resposta do heartbeat traz a hora certa da referencia
+        long diff = reply.Hora - Clock.Now();
+        Clock.Adjust(diff);
+        Log.Info($"relogio fisico ajustado em {diff} ms pela hora da referencia");
+    }
+
+    // ---------------- pedidos dos bots ----------------
 
     private Mensagem Handle(Mensagem request)
     {
@@ -100,7 +174,7 @@ public class ChatServer
             Conteudo = request.Conteudo
         };
         Net.Publish(publisher, request.Canal, post);
-        storage.SaveMessage(request.Canal, request.Remetente, request.Conteudo, request.Timestamp);
+        storage.SaveMessage(request.Canal, request.Remetente, request.Conteudo, request.Timestamp, request.Relogio);
 
         var reply = Ok("publicar");
         reply.Canal = request.Canal;
@@ -123,5 +197,10 @@ public class ChatServer
     private Mensagem Error(string type, string error)
     {
         return new Mensagem { Tipo = type, Remetente = name, Status = "erro", Erro = error };
+    }
+
+    private Mensagem NewMessage(string type)
+    {
+        return new Mensagem { Tipo = type, Remetente = name };
     }
 }

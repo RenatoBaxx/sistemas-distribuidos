@@ -23,7 +23,7 @@ public static class Log
     private static string Describe(Mensagem m)
     {
         var sb = new StringBuilder();
-        sb.Append($"tipo: {m.Tipo} | de: {m.Remetente} | hora: {Clock.Format(m.Timestamp)}");
+        sb.Append($"tipo: {m.Tipo} | de: {m.Remetente} | hora: {Clock.Format(m.Timestamp)} | lamport: {m.Relogio}");
         if (m.Status != "")
             sb.Append($" | status: {m.Status}");
         if (m.Erro != "")
@@ -34,6 +34,12 @@ public static class Log
             sb.Append($" | texto: {m.Conteudo}");
         if (m.Canais.Count > 0)
             sb.Append($" | canais: [{string.Join(", ", m.Canais)}]");
+        if (m.Rank > 0)
+            sb.Append($" | rank: {m.Rank}");
+        if (m.Servidores.Count > 0)
+            sb.Append($" | servidores: [{string.Join(", ", m.Servidores.Select(s => $"{s.Nome}#{s.Rank}"))}]");
+        if (m.Hora > 0)
+            sb.Append($" | hora informada: {Clock.Format(m.Hora)}");
         return sb.ToString();
     }
 }

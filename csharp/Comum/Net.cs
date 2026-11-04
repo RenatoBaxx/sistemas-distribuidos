@@ -8,6 +8,7 @@ public static class Net
     public static void Send(IOutgoingSocket socket, Mensagem m)
     {
         m.Timestamp = Clock.Now();
+        m.Relogio = Clock.Tick();
         Log.Sent(m);
         socket.SendFrame(m.ToByteArray());
     }
@@ -20,6 +21,7 @@ public static class Net
     public static Mensagem Read(byte[] bytes)
     {
         var m = Mensagem.Parser.ParseFrom(bytes);
+        Clock.Update(m.Relogio);
         Log.Received(m);
         return m;
     }
@@ -28,6 +30,7 @@ public static class Net
     public static void Publish(PublisherSocket socket, string topic, Mensagem m)
     {
         m.Timestamp = Clock.Now();
+        m.Relogio = Clock.Tick();
         Log.Sent(m);
         socket.SendMoreFrame(topic).SendFrame(m.ToByteArray());
     }
