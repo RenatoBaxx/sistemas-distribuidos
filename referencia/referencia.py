@@ -8,6 +8,7 @@ NOME = "referencia"
 TEMPO_SEM_HEARTBEAT = 30  # segundos sem heartbeat para o servidor sair da lista
 
 contexto = zmq.Context()
+relogio = 0  # relogio logico (lamport)
 
 ranks = {}           # nome do servidor -> rank (nao apaga, se o servidor voltar fica com o mesmo rank)
 ultimo_contato = {}  # nome do servidor -> time.time() do ultimo contato (so os disponiveis)
@@ -22,7 +23,7 @@ def hora_legivel(ms):
 
 
 def mostrar(acao, msg):
-    partes = [f"tipo={msg.tipo}", f"remetente={msg.remetente}", f"timestamp={hora_legivel(msg.timestamp)}"]
+    partes = [f"tipo={msg.tipo}", f"remetente={msg.remetente}", f"timestamp={hora_legivel(msg.timestamp)}", f"relogio={msg.relogio}"]
     for campo in ["status", "erro", "rank"]:
         valor = getattr(msg, campo)
         if valor:
@@ -41,12 +42,17 @@ def responder(tipo, erro=None, **campos):
 
 
 def enviar(socket, msg):
+    global relogio
+    relogio += 1  # lamport: soma 1 antes de enviar
+    msg.relogio = relogio
     mostrar("ENVIADO", msg)
     socket.send(msg.SerializeToString())
 
 
 def receber(socket):
+    global relogio
     msg = mensagem_pb2.Mensagem.FromString(socket.recv())
+    relogio = max(relogio, msg.relogio)  # lamport: fica com o maior
     mostrar("RECEBIDO", msg)
     return msg
 

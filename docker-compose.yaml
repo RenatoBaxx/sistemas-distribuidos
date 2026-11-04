@@ -55,6 +55,7 @@ services:
     depends_on:
       - broker
       - proxy
+      - referencia
 
   servidor-py-2:
     build:
@@ -69,6 +70,7 @@ services:
     depends_on:
       - broker
       - proxy
+      - referencia
 
   bot-cs-1:
     build:

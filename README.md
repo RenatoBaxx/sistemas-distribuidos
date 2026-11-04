@@ -31,9 +31,9 @@ Cada integrante fez um bot (cliente) e um servidor na sua linguagem:
 | C# (.NET 10) | NetMQ | `csharp/Servidor`, `csharp/Cliente` e `csharp/Comum` |
 | Python 3.12 | pyzmq | `python/servidor.py` e `python/cliente.py` |
 
-O broker foi feito em Python (`broker/broker.py`) e o proxy do Pub/Sub em C# (`proxy/`).
-Qualquer bot conversa com qualquer servidor, porque o broker e o proxy não sabem a
-linguagem de ninguém, eles só repassam as mensagens.
+O broker e o serviço de referência foram feitos em Python (`broker/` e `referencia/`) e o
+proxy do Pub/Sub em C# (`proxy/`). Qualquer bot conversa com qualquer servidor, porque o
+broker e o proxy não sabem a linguagem de ninguém, eles só repassam as mensagens.
 
 ### Serialização: Protobuf
 
@@ -49,15 +49,21 @@ A resposta sempre usa o mesmo `tipo` do pedido.
 
 | Campo | Tipo | Para que serve |
 |---|---|---|
-| tipo | string | `login`, `criar_canal`, `listar_canais`, `publicar`, `publicacao` |
+| tipo | string | `login`, `criar_canal`, `listar_canais`, `publicar`, `publicacao`, `rank`, `listar_servidores`, `heartbeat` |
 | remetente | string | nome de quem enviou (bot ou servidor) |
 | timestamp | int64 | hora do envio em milissegundos (unix) |
-| relogio | int64 | relógio lógico (vai ser usado na parte 3) |
+| relogio | int64 | relógio lógico (Lamport) de quem enviou |
 | status | string | `ok` ou `erro` nas respostas |
 | erro | string | descrição do erro |
 | canal | string | nome do canal |
 | conteudo | string | texto da mensagem |
 | canais | lista de string | lista de canais |
+| rank | int32 | rank do servidor (dado pela referência) |
+| servidores | lista de `InfoServidor` (nome e rank) | servidores disponíveis |
+| hora | int64 | hora usada para acertar o relógio físico |
+
+Os campos `rank`, `servidores` e `hora` foram adicionados na parte 3. Como o Protobuf
+aceita campos novos sem quebrar o que já existia, nada das partes anteriores mudou.
 
 ### Persistência
 
@@ -67,7 +73,7 @@ têm um registro por linha em JSON (JSON Lines):
 
 - `logins.jsonl`: todos os logins (usuário e timestamp)
 - `canais.jsonl`: canais criados (nome, quem criou e timestamp)
-- `mensagens.jsonl`: mensagens publicadas (canal, usuário, texto e timestamp do envio)
+- `mensagens.jsonl`: mensagens publicadas (canal, usuário, texto, timestamp e relógio lógico do envio)
 
 Quando o servidor inicia ele lê o `canais.jsonl` para recuperar os canais.
 
@@ -79,6 +85,7 @@ Quando o servidor inicia ele lê o `canais.jsonl` para recuperar os canais.
 ```
 bots (REQ) ---> broker (ROUTER 5555 | DEALER 5556) ---> servidores (REP)
 servidores (PUB) ---> proxy (XSUB 5557 | XPUB 5558) ---> bots (SUB)
+servidores (REQ) ---> referencia (REP 5559)
 ```
 
 Os bots se conectam na porta 5555 do broker e os servidores na 5556. O broker distribui os
@@ -137,6 +144,47 @@ Os passos 1 e 2 são feitos a cada volta do loop (e não só uma vez), assim o b
 inscrevendo aos poucos até chegar em 3 canais. Enquanto espera o 1 segundo entre as
 mensagens, o bot fica lendo o socket SUB e mostrando o que chegou, sem precisar de thread.
 
+### Relógio lógico (Lamport)
+
+Todos os bots, servidores e o serviço de referência têm um contador que começa em 0:
+
+1. antes de enviar qualquer mensagem o contador aumenta 1 e vai no campo `relogio`;
+2. quando recebe uma mensagem, o processo fica com o maior valor entre o seu contador e o
+   `relogio` que veio na mensagem.
+
+Isso vale para todas as mensagens: pedidos, respostas, publicações nos canais e as
+mensagens trocadas com a referência. O broker e o proxy só repassam bytes, então não têm
+relógio.
+
+### Serviço de referência
+
+Processo novo (`referencia/`, porta 5559) que só conversa com os servidores:
+
+| Pedido | O que faz |
+|---|---|
+| `rank` | o servidor manda o seu nome e recebe o rank. O rank é a ordem de chegada (1, 2, 3...) e o mesmo nome sempre recebe o mesmo rank |
+| `listar_servidores` | devolve nome e rank de todos os servidores disponíveis |
+| `heartbeat` | avisa que o servidor continua vivo; a resposta traz a hora certa no campo `hora` |
+
+Cada servidor pede o rank e a lista quando inicia e manda um heartbeat a cada 10 pedidos de
+bots atendidos. Se um servidor ficar 30 segundos sem mandar heartbeat ele sai da lista de
+disponíveis (volta quando mandar outro). Se a referência reiniciar e não conhecer mais o
+servidor, ela responde `erro` no heartbeat e o servidor pede o rank de novo.
+
+### Relógio físico
+
+Como todos os containers usam o relógio do mesmo computador, os relógios iriam ficar
+sempre iguais. Para dar para ver a sincronização funcionando, cada servidor começa com um
+erro aleatório de até 3 segundos para mais ou para menos. A cada heartbeat o servidor
+compara a sua hora com a hora que veio na resposta e corrige a diferença:
+
+```
+[servidor-py-1] relogio fisico comecando com -2049 ms de desvio
+[servidor-py-1] relogio fisico ajustado em 2048 ms com a hora da referencia
+```
+
+Toda hora que aparece nas mensagens dos servidores (`timestamp`) já usa o relógio ajustado.
+
 ### Erros tratados
 
 | Pedido | Quando dá erro |
@@ -166,6 +214,7 @@ parte 5 (replicação).
 proto/mensagem.proto    formato das mensagens
 broker/                 broker req/rep (Python)
 proxy/                  proxy pub/sub (C#)
+referencia/             serviço de referência (Python)
 csharp/Comum/           código usado pelo servidor e pelo bot em C# (Mensagem, log e envio)
 csharp/Servidor/        servidor em C#
 csharp/Cliente/         bot em C#
@@ -173,5 +222,5 @@ csharp/Dockerfile       imagem dos programas em C#
 python/servidor.py      servidor em Python
 python/cliente.py       bot em Python
 python/Dockerfile       imagem dos programas em Python
-docker-compose.yaml     sobe o broker, o proxy, 4 servidores e 4 bots
+docker-compose.yaml     sobe o broker, o proxy, a referência, 4 servidores e 4 bots
 ```

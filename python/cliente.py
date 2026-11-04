@@ -29,6 +29,7 @@ FRASES = [
 
 contexto = zmq.Context()
 req = None
+relogio = 0  # relogio logico (lamport)
 
 # socket que recebe as mensagens dos canais em que o bot entrou
 sub = contexto.socket(zmq.SUB)
@@ -45,7 +46,7 @@ def hora_legivel(ms):
 
 
 def mostrar(acao, msg):
-    partes = [f"tipo={msg.tipo}", f"remetente={msg.remetente}", f"timestamp={hora_legivel(msg.timestamp)}"]
+    partes = [f"tipo={msg.tipo}", f"remetente={msg.remetente}", f"timestamp={hora_legivel(msg.timestamp)}", f"relogio={msg.relogio}"]
     for campo in ["status", "erro", "canal", "conteudo"]:
         valor = getattr(msg, campo)
         if valor:
@@ -65,7 +66,9 @@ def conectar():
 # o REQ nao deixa mandar outro pedido sem receber a resposta,
 # entao se o servidor nao responder a tempo o socket e trocado por um novo
 def pedir(tipo, **campos):
-    msg = mensagem_pb2.Mensagem(tipo=tipo, remetente=NOME, timestamp=hora_atual(), **campos)
+    global relogio
+    relogio += 1  # lamport: soma 1 antes de enviar
+    msg = mensagem_pb2.Mensagem(tipo=tipo, remetente=NOME, timestamp=hora_atual(), relogio=relogio, **campos)
     mostrar("ENVIADO", msg)
     req.send(msg.SerializeToString())
 
@@ -76,6 +79,7 @@ def pedir(tipo, **campos):
         return None
 
     resposta = mensagem_pb2.Mensagem.FromString(req.recv())
+    relogio = max(relogio, resposta.relogio)  # lamport: fica com o maior
     mostrar("RECEBIDO", resposta)
     return resposta
 
@@ -123,6 +127,7 @@ def publicar(canal):
 
 # fica ouvindo os canais durante alguns segundos (faz o papel do sleep)
 def ouvir_canais(segundos):
+    global relogio
     limite = time.monotonic() + segundos
     while True:
         restante = limite - time.monotonic()
@@ -137,7 +142,8 @@ def ouvir_canais(segundos):
         if topico.decode() not in inscrito_em:
             continue
         msg = mensagem_pb2.Mensagem.FromString(dados)
-        print(f"[{NOME}] MENSAGEM NO CANAL: canal={msg.canal} | de={msg.remetente} | conteudo={msg.conteudo} | enviada={hora_legivel(msg.timestamp)} | recebida={hora_legivel(hora_atual())}")
+        relogio = max(relogio, msg.relogio)
+        print(f"[{NOME}] MENSAGEM NO CANAL: canal={msg.canal} | de={msg.remetente} | conteudo={msg.conteudo} | enviada={hora_legivel(msg.timestamp)} | recebida={hora_legivel(hora_atual())} | relogio={msg.relogio}")
 
 
 def main():
