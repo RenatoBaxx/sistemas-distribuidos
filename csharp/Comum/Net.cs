@@ -40,7 +40,15 @@ public static class Net
     {
         using var socket = new RequestSocket();
         socket.Options.Linger = TimeSpan.Zero;
-        socket.Connect(address);
+        try
+        {
+            socket.Connect(address);
+        }
+        catch (Exception)
+        {
+            // o NetMQ procura o nome do container na hora e da erro se ele estiver desligado
+            return null;
+        }
         Send(socket, m);
 
         if (socket.TryReceiveFrameBytes(timeout, out var bytes))

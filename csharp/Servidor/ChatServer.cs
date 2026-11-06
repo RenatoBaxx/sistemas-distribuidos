@@ -1,9 +1,12 @@
+using NetMQ;
 using NetMQ.Sockets;
 
 public class ChatServer
 {
     private const string ReferenceAddress = "tcp://referencia:5559";
+    private const int ServersPort = 5560;
     private static readonly TimeSpan ReferenceTimeout = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan ServerTimeout = TimeSpan.FromSeconds(2);
 
     private readonly string name;
     private readonly Storage storage = new Storage("dados");
@@ -11,12 +14,22 @@ public class ChatServer
 
     private int rank;
     private int clientMessages = 0;
+    private string coordinator = "";
+
+    // berkeley: diferenca do relogio de cada servidor para o do coordenador (so o coordenador usa)
+    private readonly Dictionary<string, long> clockDiffs = new Dictionary<string, long>();
 
     // pedidos dos bots (chegam pelo broker)
     private readonly ResponseSocket clients = new ResponseSocket();
 
-    // mensagens publicadas nos canais (vao para o proxy)
+    // mensagens publicadas nos canais e no topico servers (vao para o proxy)
     private readonly PublisherSocket publisher = new PublisherSocket();
+
+    // pedidos de outros servidores (eleicao e relogio)
+    private readonly ResponseSocket servers = new ResponseSocket();
+
+    // avisos de novo coordenador (topico servers)
+    private readonly SubscriberSocket serversTopic = new SubscriberSocket();
 
     public ChatServer(string name)
     {
@@ -34,14 +47,27 @@ public class ChatServer
         Log.Info($"relogio fisico comecando com {drift} ms de diferenca");
 
         publisher.Connect("tcp://proxy:5557");
+        serversTopic.Connect("tcp://proxy:5558");
+        serversTopic.Subscribe("servers");
+        servers.Bind($"tcp://*:{ServersPort}");
+
         AskRank();
         ShowServers();
+
+        // espera o SUB do topico servers conectar no proxy antes da primeira eleicao
+        Thread.Sleep(1000);
+        StartElection();
 
         clients.Connect("tcp://broker:5556");
         Log.Info("conectado no broker, esperando pedidos...");
 
-        while (true)
-            OnClientRequest();
+        // o poller atende os 3 sockets na mesma thread (os sockets do NetMQ nao sao thread-safe)
+        clients.ReceiveReady += (s, e) => OnClientRequest();
+        servers.ReceiveReady += (s, e) => OnServerRequest();
+        serversTopic.ReceiveReady += (s, e) => OnServersTopic();
+
+        using var poller = new NetMQPoller { clients, servers, serversTopic };
+        poller.Run();
     }
 
     private void OnClientRequest()
@@ -106,6 +132,97 @@ public class ChatServer
         long diff = reply.Hora - Clock.Now();
         Clock.Adjust(diff);
         Log.Info($"relogio fisico ajustado em {diff} ms pela hora da referencia");
+    }
+
+    // ---------------- eleicao (algoritmo do valentao / bully) ----------------
+
+    private void StartElection()
+    {
+        Log.Info("comecando eleicao");
+        var higher = GetServers().Where(s => s.Rank > rank).ToList();
+
+        bool someoneAnswered = false;
+        foreach (var server in higher)
+        {
+            var reply = Net.Request($"tcp://{server.Nome}:{ServersPort}", NewMessage("eleicao"), ServerTimeout);
+            if (reply?.Status == "ok")
+                someoneAnswered = true;
+        }
+
+        if (someoneAnswered)
+        {
+            // um servidor com rank maior vai assumir e avisar no topico servers
+            coordinator = "";
+            Log.Info("tem servidor com rank maior vivo, esperando o aviso do novo coordenador");
+            return;
+        }
+
+        coordinator = name;
+        clockDiffs.Clear();
+
+        var announcement = NewMessage("coordenador");
+        announcement.Conteudo = name;
+        announcement.Rank = rank;
+        Net.Publish(publisher, "servers", announcement);
+        Log.Info("ganhei a eleicao, agora eu sou o coordenador");
+    }
+
+    private void OnServersTopic()
+    {
+        var topic = serversTopic.ReceiveFrameString();
+        var announcement = Net.Read(serversTopic.ReceiveFrameBytes());
+        if (topic != "servers" || announcement.Tipo != "coordenador")
+            return;
+
+        coordinator = announcement.Conteudo;
+        Log.Info($"novo coordenador: {coordinator}");
+
+        // bully: se quem ganhou tem rank menor que o meu, eu tenho que assumir
+        if (announcement.Rank < rank)
+            StartElection();
+    }
+
+    // pedidos que chegam de outros servidores pela porta 5560
+    private void OnServerRequest()
+    {
+        var request = Net.Receive(servers);
+        switch (request.Tipo)
+        {
+            case "eleicao":
+                // quem pediu tem rank menor: responde OK e continua a eleicao daqui
+                Net.Send(servers, Ok("eleicao"));
+                StartElection();
+                break;
+            case "relogio":
+                Net.Send(servers, AnswerClock(request));
+                break;
+            default:
+                Net.Send(servers, Error(request.Tipo, "nao conheco esse tipo de mensagem"));
+                break;
+        }
+    }
+
+    // berkeley (parte do coordenador): guarda a diferenca do relogio de quem pediu, faz a media
+    // de todas as diferencas (o coordenador conta como 0) e devolve a hora ja na media
+    private Mensagem AnswerClock(Mensagem request)
+    {
+        if (coordinator != name)
+            return Error("relogio", "eu nao sou o coordenador");
+
+        clockDiffs[request.Remetente] = request.Hora - Clock.Now();
+        long average = clockDiffs.Values.Sum() / (clockDiffs.Count + 1);
+
+        // o coordenador tambem anda ate a media, entao as diferencas guardadas mudam junto
+        Clock.Adjust(average);
+        foreach (var server in clockDiffs.Keys.ToList())
+            clockDiffs[server] -= average;
+
+        // quem pediu vai usar a hora da resposta, entao fica sem diferenca
+        clockDiffs[request.Remetente] = 0;
+
+        var reply = Ok("relogio");
+        reply.Hora = Clock.Now();
+        return reply;
     }
 
     // ---------------- pedidos dos bots ----------------
