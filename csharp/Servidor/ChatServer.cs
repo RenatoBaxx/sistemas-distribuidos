@@ -79,6 +79,8 @@ public class ChatServer
         clientMessages++;
         if (clientMessages % 10 == 0)
             SendHeartbeat();
+        if (clientMessages % 15 == 0)
+            SyncClock();
     }
 
     // ---------------- servico de referencia ----------------
@@ -117,21 +119,9 @@ public class ChatServer
     {
         var reply = Net.Request(ReferenceAddress, NewMessage("heartbeat"), ReferenceTimeout);
         if (reply == null)
-        {
             Log.Info("a referencia nao respondeu o heartbeat");
-            return;
-        }
-        if (reply.Status == "erro")
-        {
-            // a referencia reiniciou e nao conhece mais este servidor
-            AskRank();
-            return;
-        }
-
-        // a resposta do heartbeat traz a hora certa da referencia
-        long diff = reply.Hora - Clock.Now();
-        Clock.Adjust(diff);
-        Log.Info($"relogio fisico ajustado em {diff} ms pela hora da referencia");
+        else if (reply.Status == "erro")
+            AskRank(); // a referencia reiniciou e nao conhece mais este servidor
     }
 
     // ---------------- eleicao (algoritmo do valentao / bully) ----------------
@@ -223,6 +213,35 @@ public class ChatServer
         var reply = Ok("relogio");
         reply.Hora = Clock.Now();
         return reply;
+    }
+
+    // berkeley (parte de quem pede): manda a sua hora para o coordenador e usa a hora da resposta.
+    // se o coordenador nao responder, considera que ele caiu e faz uma eleicao
+    private void SyncClock()
+    {
+        if (coordinator == "")
+        {
+            StartElection();
+            return;
+        }
+        if (coordinator == name)
+            return;
+
+        var request = NewMessage("relogio");
+        request.Hora = Clock.Now();
+        var reply = Net.Request($"tcp://{coordinator}:{ServersPort}", request, ServerTimeout);
+
+        if (reply == null || reply.Status != "ok")
+        {
+            Log.Info($"o coordenador {coordinator} nao respondeu, comecando nova eleicao");
+            coordinator = "";
+            StartElection();
+            return;
+        }
+
+        long diff = reply.Hora - Clock.Now();
+        Clock.Adjust(diff);
+        Log.Info($"relogio fisico ajustado em {diff} ms pelo coordenador {coordinator}");
     }
 
     // ---------------- pedidos dos bots ----------------
