@@ -20,6 +20,14 @@ docker compose up --build
 Não precisa digitar nada, os bots fazem tudo sozinhos. Para parar é só dar `Ctrl+C`
 e depois `docker compose down`.
 
+Para testar a eleição, em outro terminal, derrube o coordenador (o nome dele aparece no
+log como `ganhei a eleicao`) e depois ligue de novo:
+
+```
+docker compose stop servidor-cs-1
+docker compose start servidor-cs-1
+```
+
 ## Escolhas do grupo
 
 ### Linguagens
@@ -35,6 +43,11 @@ O broker e o serviço de referência foram feitos em Python (`broker/` e `refere
 proxy do Pub/Sub em C# (`proxy/`). Qualquer bot conversa com qualquer servidor, porque o
 broker e o proxy não sabem a linguagem de ninguém, eles só repassam as mensagens.
 
+Cada integrante programou do seu jeito: o C# ficou orientado a objetos (classes `ChatServer`,
+`Storage` e `Bot`, e o que o servidor e o bot usam juntos fica no projeto `Comum`) e o Python
+ficou com funções simples em cada arquivo. O que é igual nos dois é o protocolo: o `.proto`,
+os tipos de mensagem, as portas e as regras de validação.
+
 ### Serialização: Protobuf
 
 As mensagens são serializadas em binário com Protobuf. Escolhemos o Protobuf porque um
@@ -49,7 +62,7 @@ A resposta sempre usa o mesmo `tipo` do pedido.
 
 | Campo | Tipo | Para que serve |
 |---|---|---|
-| tipo | string | `login`, `criar_canal`, `listar_canais`, `publicar`, `publicacao`, `rank`, `listar_servidores`, `heartbeat` |
+| tipo | string | `login`, `criar_canal`, `listar_canais`, `publicar`, `publicacao`, `rank`, `listar_servidores`, `heartbeat`, `eleicao`, `relogio`, `coordenador` |
 | remetente | string | nome de quem enviou (bot ou servidor) |
 | timestamp | int64 | hora do envio em milissegundos (unix) |
 | relogio | int64 | relógio lógico (Lamport) de quem enviou |
@@ -86,6 +99,8 @@ Quando o servidor inicia ele lê o `canais.jsonl` para recuperar os canais.
 bots (REQ) ---> broker (ROUTER 5555 | DEALER 5556) ---> servidores (REP)
 servidores (PUB) ---> proxy (XSUB 5557 | XPUB 5558) ---> bots (SUB)
 servidores (REQ) ---> referencia (REP 5559)
+servidores (REQ) ---> outro servidor (REP 5560)        eleicao e relogio
+servidores (PUB [servers]) ---> proxy ---> servidores (SUB [servers])
 ```
 
 Os bots se conectam na porta 5555 do broker e os servidores na 5556. O broker distribui os
@@ -164,34 +179,98 @@ Processo novo (`referencia/`, porta 5559) que só conversa com os servidores:
 |---|---|
 | `rank` | o servidor manda o seu nome e recebe o rank. O rank é a ordem de chegada (1, 2, 3...) e o mesmo nome sempre recebe o mesmo rank |
 | `listar_servidores` | devolve nome e rank de todos os servidores disponíveis |
-| `heartbeat` | avisa que o servidor continua vivo; a resposta traz a hora certa no campo `hora` |
+| `heartbeat` | avisa que o servidor continua vivo |
 
 Cada servidor pede o rank e a lista quando inicia e manda um heartbeat a cada 10 pedidos de
 bots atendidos. Se um servidor ficar 30 segundos sem mandar heartbeat ele sai da lista de
 disponíveis (volta quando mandar outro). Se a referência reiniciar e não conhecer mais o
 servidor, ela responde `erro` no heartbeat e o servidor pede o rank de novo.
 
+Na parte 3 a resposta do heartbeat também trazia a hora certa no campo `hora`. Na parte 4
+isso foi tirado, porque agora quem acerta os relógios é o coordenador.
+
 ### Relógio físico
 
 Como todos os containers usam o relógio do mesmo computador, os relógios iriam ficar
 sempre iguais. Para dar para ver a sincronização funcionando, cada servidor começa com um
-erro aleatório de até 3 segundos para mais ou para menos. A cada heartbeat o servidor
-compara a sua hora com a hora que veio na resposta e corrige a diferença:
+erro aleatório de até 3 segundos para mais ou para menos:
 
 ```
 [servidor-py-1] relogio fisico comecando com -2049 ms de desvio
-[servidor-py-1] relogio fisico ajustado em 2048 ms com a hora da referencia
 ```
 
 Toda hora que aparece nas mensagens dos servidores (`timestamp`) já usa o relógio ajustado.
+Como só os servidores acertam o relógio entre si (os bots usam a hora do computador), às
+vezes um bot mostra uma mensagem com a hora de recebimento menor que a de envio. É
+exatamente o problema de confiar no relógio físico, e é por isso que existe o relógio
+lógico: o valor de Lamport sempre aumenta na ordem certa.
+
+### Eleição do coordenador (algoritmo do valentão / Bully)
+
+Cada servidor guarda numa variável o nome do coordenador atual. Para a eleição, cada
+servidor tem um socket REP na porta 5560 (o endereço é o próprio nome do container, por
+exemplo `tcp://servidor-py-1:5560`) e assina o tópico `servers` no proxy.
+
+Quando um servidor começa uma eleição:
+
+1. pega a lista de servidores na referência e manda `eleicao` para todos com rank maior;
+2. quem recebe `eleicao` responde `ok` e começa a sua própria eleição;
+3. se ninguém com rank maior responder em 2 segundos, ele vira o coordenador e publica no
+   tópico `servers` uma mensagem `coordenador` com o seu nome (no campo `conteudo`) e o seu
+   rank;
+4. todos os servidores recebem esse aviso e atualizam a variável do coordenador. Se quem
+   se anunciou tiver rank menor que o de quem recebeu, quem recebeu começa outra eleição
+   (ele é que deveria ganhar).
+
+```
+servidor A -> servidor B : REQ eleicao
+servidor B -> servidor A : REP ok
+servidor C -> PUB [servers] coordenador (servidor C)
+```
+
+A eleição acontece quando o servidor liga, quando o coordenador não responde o pedido de
+relógio e quando chega um pedido de eleição de um servidor com rank menor. No fim, o
+coordenador é sempre o servidor vivo com o maior rank.
+
+### Sincronização com o coordenador (Berkeley)
+
+A cada 15 pedidos de bots atendidos, o servidor pede a hora para o coordenador:
+
+```
+servidor    -> coordenador : REQ relogio (hora = hora do servidor)
+coordenador -> servidor    : REP hora correta
+```
+
+O enunciado pede que o servidor pergunte a hora para o coordenador, então adaptamos o
+algoritmo de Berkeley para esse formato (no original é o coordenador que pergunta para
+todo mundo de uma vez):
+
+1. o servidor manda a sua hora no campo `hora`;
+2. o coordenador guarda a diferença entre essa hora e a dele (uma diferença por servidor);
+3. o coordenador calcula a média das diferenças, contando ele mesmo como diferença 0,
+   e move o próprio relógio até essa média;
+4. o coordenador responde com a sua hora já corrigida e o servidor passa a usar essa hora.
+
+Assim, depois de alguns pedidos, todos os servidores ficam com a hora da média dos
+relógios, que é a ideia do Berkeley:
+
+```
+[servidor-py-2] relogio fisico ajustado em 463 ms pelo coordenador servidor-cs-1
+[servidor-py-2] relogio fisico ajustado em 63 ms pelo coordenador servidor-cs-1
+[servidor-py-2] relogio fisico ajustado em 7 ms pelo coordenador servidor-cs-1
+```
+
+Se o coordenador não responder em 2 segundos, o servidor considera que ele caiu e começa
+uma nova eleição. O coordenador não pede a hora para ninguém.
 
 ### Erros tratados
 
 | Pedido | Quando dá erro |
 |---|---|
 | login | nome vazio, com mais de 20 caracteres ou com caracteres fora de `a-z`, `0-9`, `-` e `_` |
-| criar_canal | nome inválido (mesma regra do login), canal que já existe ou o nome `servers` (reservado para a parte 4) |
+| criar_canal | nome inválido (mesma regra do login), canal que já existe ou o nome `servers` (reservado para o tópico da eleição) |
 | publicar | nome de canal inválido, canal `servers` ou mensagem vazia |
+| relogio | quem recebeu o pedido não é o coordenador |
 | outro tipo | `tipo de mensagem desconhecido` |
 
 Login repetido é aceito, só fica registrado de novo no arquivo.
