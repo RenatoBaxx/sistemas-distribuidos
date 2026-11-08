@@ -136,17 +136,11 @@ def lista_de_servidores():
 
 
 def mandar_heartbeat():
-    global desvio
     resposta = perguntar(REFERENCIA, criar_mensagem("heartbeat"))
     if resposta is None:
         print(f"[{NOME}] a referencia nao respondeu o heartbeat")
     elif resposta.status == "erro":
         pegar_rank()  # a referencia reiniciou e esqueceu este servidor
-    else:
-        # a resposta do heartbeat traz a hora certa da referencia
-        diferenca = resposta.hora - hora_atual()
-        desvio += diferenca
-        print(f"[{NOME}] relogio fisico ajustado em {diferenca} ms com a hora da referencia")
 
 
 # ---------------- eleicao (algoritmo do valentao / bully) ----------------
@@ -204,6 +198,28 @@ def responder_relogio(pedido):
         diferencas[nome] -= media
     diferencas[pedido.remetente] = 0  # quem pediu vai usar a hora da resposta
     return responder("relogio", hora=hora_atual())
+
+
+# berkeley (parte de quem pede): manda a sua hora para o coordenador e usa a hora da resposta.
+# se o coordenador nao responder, considera que ele caiu e faz uma eleicao
+def sincronizar_relogio():
+    global desvio, coordenador
+    if coordenador == "":
+        fazer_eleicao()
+        return
+    if coordenador == NOME:
+        return
+
+    resposta = perguntar(endereco_de(coordenador), criar_mensagem("relogio", hora=hora_atual()))
+    if resposta is None or resposta.status != "ok":
+        print(f"[{NOME}] o coordenador {coordenador} nao respondeu, comecando nova eleicao")
+        coordenador = ""
+        fazer_eleicao()
+        return
+
+    diferenca = resposta.hora - hora_atual()
+    desvio += diferenca
+    print(f"[{NOME}] relogio fisico ajustado em {diferenca} ms pelo coordenador {coordenador}")
 
 
 # pedidos que chegam de outros servidores pela porta 5560
@@ -298,6 +314,8 @@ def atender_bot():
     atendidos += 1
     if atendidos % 10 == 0:
         mandar_heartbeat()
+    if atendidos % 15 == 0:
+        sincronizar_relogio()
 
 
 def main():

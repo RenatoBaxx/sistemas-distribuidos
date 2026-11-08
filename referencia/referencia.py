@@ -30,8 +30,6 @@ def mostrar(acao, msg):
             partes.append(f"{campo}={valor}")
     if msg.servidores:
         partes.append("servidores=" + ",".join(f"{s.nome}(rank {s.rank})" for s in msg.servidores))
-    if msg.hora:
-        partes.append(f"hora={hora_legivel(msg.hora)}")
     print(f"[{NOME}] {acao}: " + " | ".join(partes))
 
 
@@ -78,8 +76,7 @@ def receber_heartbeat(pedido):
     if nome not in ranks:
         return responder("heartbeat", erro="servidor sem rank, peca o rank primeiro")
     ultimo_contato[nome] = time.time()
-    # aproveita a resposta do heartbeat para mandar a hora certa
-    return responder("heartbeat", hora=hora_atual())
+    return responder("heartbeat")
 
 
 def remover_inativos():
