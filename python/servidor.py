@@ -3,6 +3,7 @@ import os
 import random
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 
 import zmq
@@ -16,11 +17,17 @@ PORTA_SERVIDORES = 5560
 # letras minusculas, numeros, - e _ (de 1 a 20 caracteres)
 NOME_VALIDO = re.compile(r"[a-z0-9_-]{1,20}")
 
+# topicos do proxy usados entre os servidores (os bots nao podem usar como canal)
+RESERVADOS = ["servers", "replicacao"]
+
+# arquivo onde cada tipo de registro e guardado
+ARQUIVOS = {"login": "logins.jsonl", "criar_canal": "canais.jsonl", "publicar": "mensagens.jsonl"}
+
 contexto = zmq.Context()
 socket_bots = contexto.socket(zmq.REP)
 pub = contexto.socket(zmq.PUB)                 # publicacoes nos canais e no topico servers (vai para o proxy)
-socket_servidores = contexto.socket(zmq.REP)   # pedidos de outros servidores (eleicao e relogio)
-sub_servers = contexto.socket(zmq.SUB)         # avisos de novo coordenador (topico servers)
+socket_servidores = contexto.socket(zmq.REP)   # pedidos de outros servidores (eleicao, relogio e sincronizar)
+sub_servers = contexto.socket(zmq.SUB)         # avisos de novo coordenador (servers) e replicas (replicacao)
 
 canais = []
 relogio = 0   # relogio logico (lamport)
@@ -29,6 +36,8 @@ meu_rank = 0
 coordenador = ""
 atendidos = 0
 diferencas = {}  # berkeley: nome do servidor -> diferenca para o relogio do coordenador
+registros = []   # replicacao: todos os dados (logins, canais e mensagens), deste e dos outros servidores
+vistos = set()   # replicacao: ids dos registros que ja estao gravados
 
 
 def hora_atual():
@@ -51,7 +60,20 @@ def mostrar(acao, msg):
         partes.append("servidores=" + ",".join(f"{s.nome}(rank {s.rank})" for s in msg.servidores))
     if msg.hora:
         partes.append(f"hora={hora_legivel(msg.hora)}")
+    if len(msg.historico) == 1:
+        partes.append("registro=" + descrever_registro(msg.historico[0]))
+    elif msg.historico:
+        partes.append(f"historico={len(msg.historico)} registros")
     print(f"[{NOME}] {acao}: " + " | ".join(partes))
+
+
+def descrever_registro(r):
+    texto = f"({r.tipo} de {r.remetente}"
+    if r.canal:
+        texto += f" canal={r.canal}"
+    if r.conteudo:
+        texto += f" conteudo={r.conteudo}"
+    return texto + f" relogio={r.relogio} id={r.id})"
 
 
 def criar_mensagem(tipo, **campos):
@@ -101,18 +123,104 @@ def perguntar(endereco, msg, espera=2000):
 
 # ---------------- persistencia (um json por linha) ----------------
 
-def guardar(arquivo, **dados):
-    with open(os.path.join(PASTA_DADOS, arquivo), "a") as f:
-        f.write(json.dumps(dados) + "\n")
+# cada dado (login, canal ou mensagem) e um "registro": uma Mensagem com o pedido original do bot
+# e um id unico. E o registro que vai para o disco e que e mandado para os outros servidores.
+
+def registro_para_json(r):
+    if r.tipo == "login":
+        return {"usuario": r.remetente, "timestamp": r.timestamp, "relogio": r.relogio, "id": r.id}
+    if r.tipo == "criar_canal":
+        return {"canal": r.canal, "criado_por": r.remetente, "timestamp": r.timestamp, "relogio": r.relogio, "id": r.id}
+    return {"canal": r.canal, "usuario": r.remetente, "conteudo": r.conteudo,
+            "timestamp": r.timestamp, "relogio": r.relogio, "id": r.id}
 
 
-def carregar_canais():
-    caminho = os.path.join(PASTA_DADOS, "canais.jsonl")
-    if os.path.exists(caminho):
-        with open(caminho) as f:
-            for linha in f:
-                canais.append(json.loads(linha)["canal"])
-    print(f"[{NOME}] {len(canais)} canais carregados do disco")
+def json_para_registro(tipo, dados):
+    return mensagem_pb2.Mensagem(
+        tipo=tipo,
+        remetente=dados.get("usuario") or dados.get("criado_por", ""),
+        timestamp=dados.get("timestamp", 0),
+        relogio=dados.get("relogio", 0),
+        canal=dados.get("canal", ""),
+        conteudo=dados.get("conteudo", ""),
+        id=dados.get("id", ""),  # dados salvos antes da parte 5 nao tem id
+    )
+
+
+def novo_registro(tipo, pedido, timestamp, **campos):
+    return mensagem_pb2.Mensagem(tipo=tipo, remetente=pedido.remetente, timestamp=timestamp,
+                                 relogio=pedido.relogio, id=uuid.uuid4().hex, **campos)
+
+
+def guardar_na_memoria(r):
+    registros.append(r)
+    if r.id:
+        vistos.add(r.id)
+    # o canal e identificado pelo nome: se dois servidores criaram o mesmo canal ao mesmo tempo,
+    # os dois registros ficam guardados, mas o canal aparece uma vez so na lista
+    if r.tipo == "criar_canal" and r.canal not in canais:
+        canais.append(r.canal)
+
+
+# grava o registro se ele ainda nao existe aqui; devolve True se era novo
+def aplicar(r):
+    if not r.id or r.id in vistos or r.tipo not in ARQUIVOS:
+        return False
+    with open(os.path.join(PASTA_DADOS, ARQUIVOS[r.tipo]), "a") as f:
+        f.write(json.dumps(registro_para_json(r)) + "\n")
+    guardar_na_memoria(r)
+    return True
+
+
+def carregar_dados():
+    for tipo, arquivo in ARQUIVOS.items():
+        caminho = os.path.join(PASTA_DADOS, arquivo)
+        if os.path.exists(caminho):
+            with open(caminho) as f:
+                for linha in f:
+                    guardar_na_memoria(json_para_registro(tipo, json.loads(linha)))
+    print(f"[{NOME}] {len(registros)} registros e {len(canais)} canais carregados do disco")
+
+
+# ---------------- replicacao (escrita em todas as replicas) ----------------
+
+# manda o registro novo para todos os servidores pelo topico replicacao do proxy
+def replicar(r):
+    envelope = criar_mensagem("replicacao")
+    envelope.historico.append(r)
+    marcar_envio(envelope)
+    mostrar("PUBLICADO", envelope)
+    pub.send_multipart([b"replicacao", envelope.SerializeToString()])
+
+
+def receber_replica(envelope):
+    if envelope.remetente == NOME:
+        return  # a propria replica volta pelo SUB
+    for r in envelope.historico:
+        if aplicar(r):
+            print(f"[{NOME}] gravei a replica de {envelope.remetente}: {descrever_registro(r)}")
+
+
+# quando um servidor liga ele pede tudo o que os outros tem (pode ter perdido coisas enquanto
+# estava desligado e o pub/sub nao guarda mensagens antigas)
+def sincronizar_dados(servidores):
+    outros = [s for s in servidores if s.nome != NOME]
+    if not outros:
+        print(f"[{NOME}] nenhum outro servidor para sincronizar os dados")
+    for s in outros:
+        resposta = perguntar(endereco_de(s.nome), criar_mensagem("sincronizar"))
+        if resposta is None or resposta.status != "ok":
+            print(f"[{NOME}] {s.nome} nao respondeu a sincronizacao")
+            continue
+        novos = sum(aplicar(r) for r in resposta.historico)
+        print(f"[{NOME}] sincronizei com {s.nome}: {novos} registros novos de {len(resposta.historico)}")
+
+
+# resposta do sincronizar: todos os registros, na ordem do relogio logico (o id desempata)
+def responder_sincronizacao():
+    resposta = responder("sincronizar")
+    resposta.historico.extend(sorted((r for r in registros if r.id), key=lambda r: (r.relogio, r.id)))
+    return resposta
 
 
 # ---------------- servico de referencia ----------------
@@ -170,10 +278,14 @@ def fazer_eleicao():
     print(f"[{NOME}] ganhei a eleicao, agora eu sou o coordenador")
 
 
+# mensagens dos topicos servers (novo coordenador) e replicacao (dados novos dos outros servidores)
 def receber_aviso():
     global coordenador
     topico, dados = sub_servers.recv_multipart()
     aviso = ler(dados)
+    if topico == b"replicacao" and aviso.tipo == "replicacao":
+        receber_replica(aviso)
+        return
     if topico != b"servers" or aviso.tipo != "coordenador":
         return
 
@@ -230,6 +342,8 @@ def atender_servidor():
         fazer_eleicao()  # quem pediu tem rank menor, entao a eleicao continua daqui
     elif pedido.tipo == "relogio":
         enviar(socket_servidores, responder_relogio(pedido))
+    elif pedido.tipo == "sincronizar":
+        enviar(socket_servidores, responder_sincronizacao())
     else:
         enviar(socket_servidores, responder(pedido.tipo, erro="tipo de mensagem desconhecido"))
 
@@ -240,7 +354,9 @@ def fazer_login(pedido):
     if not NOME_VALIDO.fullmatch(pedido.remetente):
         return responder("login", erro="nome invalido (use a-z, 0-9, - ou _ e no maximo 20 letras)")
 
-    guardar("logins.jsonl", usuario=pedido.remetente, timestamp=hora_atual())
+    registro = novo_registro("login", pedido, hora_atual())
+    aplicar(registro)
+    replicar(registro)
     return responder("login")
 
 
@@ -248,8 +364,8 @@ def criar_canal(pedido):
     nome = pedido.canal
     if not NOME_VALIDO.fullmatch(nome):
         erro = "nome de canal invalido"
-    elif nome == "servers":
-        erro = "servers e um nome reservado"
+    elif nome in RESERVADOS:
+        erro = f"{nome} e um nome reservado"
     elif nome in canais:
         erro = "canal ja existe"
     else:
@@ -258,8 +374,9 @@ def criar_canal(pedido):
     if erro:
         return responder("criar_canal", erro=erro)
 
-    canais.append(nome)
-    guardar("canais.jsonl", canal=nome, criado_por=pedido.remetente, timestamp=hora_atual())
+    registro = novo_registro("criar_canal", pedido, hora_atual(), canal=nome)
+    aplicar(registro)
+    replicar(registro)
     return responder("criar_canal", canal=nome)
 
 
@@ -267,9 +384,10 @@ def listar_canais(pedido):
     return responder("listar_canais", canais=canais)
 
 
-# nao confere se o canal existe aqui porque, com o round-robin, cada servidor so conhece parte dos canais
+# nao confere se o canal esta na lista porque um canal criado agora em outro servidor
+# pode ainda nao ter chegado aqui pela replicacao
 def publicar(pedido):
-    if not NOME_VALIDO.fullmatch(pedido.canal) or pedido.canal == "servers":
+    if not NOME_VALIDO.fullmatch(pedido.canal) or pedido.canal in RESERVADOS:
         return responder("publicar", erro="canal invalido")
     if not pedido.conteudo.strip():
         return responder("publicar", erro="mensagem vazia")
@@ -286,8 +404,9 @@ def publicar(pedido):
     mostrar("PUBLICADO", publicacao)
     pub.send_multipart([pedido.canal.encode(), publicacao.SerializeToString()])
 
-    guardar("mensagens.jsonl", canal=pedido.canal, usuario=pedido.remetente, conteudo=pedido.conteudo,
-            timestamp=pedido.timestamp, relogio=pedido.relogio)
+    registro = novo_registro("publicar", pedido, pedido.timestamp, canal=pedido.canal, conteudo=pedido.conteudo)
+    aplicar(registro)
+    replicar(registro)
     return responder("publicar", canal=pedido.canal)
 
 
@@ -321,7 +440,7 @@ def atender_bot():
 def main():
     global desvio
     os.makedirs(PASTA_DADOS, exist_ok=True)
-    carregar_canais()
+    carregar_dados()
 
     # todos os containers usam o relogio do mesmo computador,
     # entao o desvio aleatorio simula servidores com relogios diferentes
@@ -330,14 +449,17 @@ def main():
 
     pub.connect("tcp://proxy:5557")
     sub_servers.connect("tcp://proxy:5558")
-    sub_servers.setsockopt_string(zmq.SUBSCRIBE, "servers")
+    for topico in RESERVADOS:
+        sub_servers.setsockopt_string(zmq.SUBSCRIBE, topico)
     socket_servidores.bind(f"tcp://*:{PORTA_SERVIDORES}")
 
     pegar_rank()
     servidores = lista_de_servidores()
     print(f"[{NOME}] servidores disponiveis: " + ", ".join(f"{s.nome} (rank {s.rank})" for s in servidores))
 
-    time.sleep(1)  # da tempo do SUB do topico servers conectar no proxy
+    time.sleep(1)  # da tempo do SUB dos topicos servers e replicacao conectar no proxy
+    # assina a replicacao antes de pedir os dados, entao nada se perde no meio (o id evita duplicar)
+    sincronizar_dados(servidores)
     fazer_eleicao()
 
     socket_bots.connect("tcp://broker:5556")

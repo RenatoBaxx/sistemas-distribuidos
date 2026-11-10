@@ -8,8 +8,8 @@ Toda a comunicação é feita com ZeroMQ e tudo roda em containers com Docker Co
 
 ## Integrantes
 
-- Integrante 1 - C#
-- Integrante 2 - Python
+- Renato Baxmann - C#
+- João Rangel - Python
 
 ## Como rodar
 
@@ -27,6 +27,17 @@ log como `ganhei a eleicao`) e depois ligue de novo:
 docker compose stop servidor-cs-1
 docker compose start servidor-cs-1
 ```
+
+O mesmo teste mostra a replicação: quando o servidor volta, ele aparece no log com
+`sincronizei com ...: N registros novos`, que são os dados que ele perdeu enquanto estava
+desligado. Para conferir que todos os servidores têm os mesmos dados:
+
+```
+wc -l dados/*/mensagens.jsonl
+```
+
+Se a pasta `dados/` tiver sobrado de uma execução das partes anteriores (sem o campo `id`),
+apague antes de rodar (`rm -rf dados`).
 
 ## Escolhas do grupo
 
@@ -62,7 +73,7 @@ A resposta sempre usa o mesmo `tipo` do pedido.
 
 | Campo | Tipo | Para que serve |
 |---|---|---|
-| tipo | string | `login`, `criar_canal`, `listar_canais`, `publicar`, `publicacao`, `rank`, `listar_servidores`, `heartbeat`, `eleicao`, `relogio`, `coordenador` |
+| tipo | string | `login`, `criar_canal`, `listar_canais`, `publicar`, `publicacao`, `rank`, `listar_servidores`, `heartbeat`, `eleicao`, `relogio`, `coordenador`, `replicacao`, `sincronizar` |
 | remetente | string | nome de quem enviou (bot ou servidor) |
 | timestamp | int64 | hora do envio em milissegundos (unix) |
 | relogio | int64 | relógio lógico (Lamport) de quem enviou |
@@ -74,9 +85,12 @@ A resposta sempre usa o mesmo `tipo` do pedido.
 | rank | int32 | rank do servidor (dado pela referência) |
 | servidores | lista de `InfoServidor` (nome e rank) | servidores disponíveis |
 | hora | int64 | hora usada para acertar o relógio físico |
+| id | string | id único de um registro (login, canal ou mensagem) na replicação |
+| historico | lista de `Mensagem` | registros mandados de um servidor para outro na replicação |
 
-Os campos `rank`, `servidores` e `hora` foram adicionados na parte 3. Como o Protobuf
-aceita campos novos sem quebrar o que já existia, nada das partes anteriores mudou.
+Os campos `rank`, `servidores` e `hora` foram adicionados na parte 3, e `id` e `historico`
+na parte 5. Como o Protobuf aceita campos novos sem quebrar o que já existia, nada das
+partes anteriores mudou.
 
 ### Persistência
 
@@ -84,11 +98,13 @@ Cada servidor salva os dados na sua própria pasta (`dados/<nome do servidor>/`)
 volume do Docker, então nada se perde quando os containers são reiniciados. Os arquivos
 têm um registro por linha em JSON (JSON Lines):
 
-- `logins.jsonl`: todos os logins (usuário e timestamp)
-- `canais.jsonl`: canais criados (nome, quem criou e timestamp)
-- `mensagens.jsonl`: mensagens publicadas (canal, usuário, texto, timestamp e relógio lógico do envio)
+- `logins.jsonl`: todos os logins (usuário, timestamp, relógio lógico e id)
+- `canais.jsonl`: canais criados (nome, quem criou, timestamp, relógio lógico e id)
+- `mensagens.jsonl`: mensagens publicadas (canal, usuário, texto, timestamp e relógio lógico do envio e id)
 
-Quando o servidor inicia ele lê o `canais.jsonl` para recuperar os canais.
+Quando o servidor inicia ele lê os três arquivos para recuperar os canais e saber quais
+registros já tem (pelo `id`, ver a seção de replicação). Desde a parte 5 cada servidor
+guarda os dados de todos os servidores, mas continua com os seus próprios arquivos.
 
 > O JSON é usado só para guardar os dados no disco. As mensagens que passam pela rede são
 > sempre Protobuf (binário).
@@ -99,8 +115,8 @@ Quando o servidor inicia ele lê o `canais.jsonl` para recuperar os canais.
 bots (REQ) ---> broker (ROUTER 5555 | DEALER 5556) ---> servidores (REP)
 servidores (PUB) ---> proxy (XSUB 5557 | XPUB 5558) ---> bots (SUB)
 servidores (REQ) ---> referencia (REP 5559)
-servidores (REQ) ---> outro servidor (REP 5560)        eleicao e relogio
-servidores (PUB [servers]) ---> proxy ---> servidores (SUB [servers])
+servidores (REQ) ---> outro servidor (REP 5560)        eleicao, relogio e sincronizar
+servidores (PUB [servers] e [replicacao]) ---> proxy ---> servidores (SUB [servers] e [replicacao])
 ```
 
 Os bots se conectam na porta 5555 do broker e os servidores na 5556. O broker distribui os
@@ -136,8 +152,8 @@ começo da mensagem para filtrar o tópico, e a segunda é a `Mensagem` em Proto
 `tipo = publicacao`. Na publicação o `remetente` é o bot que escreveu a mensagem, para
 quem recebe saber quem mandou.
 
-O servidor não confere se o canal existe na lista dele, só se o nome é válido, porque com
-o round-robin cada servidor só conhece uma parte dos canais (ver a observação no final).
+O servidor não confere se o canal existe na lista dele, só se o nome é válido, porque um
+canal que acabou de ser criado em outro servidor pode ainda não ter chegado pela replicação.
 
 Quando chega uma mensagem de um canal em que o bot está inscrito, ele mostra o canal, quem
 mandou, o texto, a hora do envio e a hora do recebimento. Cada bot mostra do seu jeito:
@@ -268,8 +284,8 @@ uma nova eleição. O coordenador não pede a hora para ninguém.
 | Pedido | Quando dá erro |
 |---|---|
 | login | nome vazio, com mais de 20 caracteres ou com caracteres fora de `a-z`, `0-9`, `-` e `_` |
-| criar_canal | nome inválido (mesma regra do login), canal que já existe ou o nome `servers` (reservado para o tópico da eleição) |
-| publicar | nome de canal inválido, canal `servers` ou mensagem vazia |
+| criar_canal | nome inválido (mesma regra do login), canal que já existe ou os nomes `servers` e `replicacao` (reservados para os tópicos usados entre os servidores) |
+| publicar | nome de canal inválido, canal `servers` ou `replicacao` ou mensagem vazia |
 | relogio | quem recebeu o pedido não é o coordenador |
 | outro tipo | `tipo de mensagem desconhecido` |
 
@@ -279,13 +295,92 @@ Os bots esperam a resposta por no máximo 5 segundos. Assim, se um servidor cair
 de um pedido, o bot não fica travado esperando para sempre (no C# cada pedido usa um
 socket REQ novo e no Python o socket REQ é recriado quando estoura o tempo).
 
-### Observação sobre o round-robin
+### Replicação (parte 5)
 
-Como cada pedido pode cair em um servidor diferente e cada servidor tem os seus próprios
-dados, a lista de canais muda dependendo de qual servidor respondeu. Por exemplo, um bot
-pode ver numa lista que o canal `jogos` não existe e, ao tentar criar, receber
-`canal ja existe` de outro servidor. Isso é esperado nesta parte e vai ser resolvido na
-parte 5 (replicação).
+> Em andamento: por enquanto a replicação está só no servidor Python. O servidor C# ainda
+> não assina o tópico `replicacao` nem responde o `sincronizar` (responde `erro`, e o servidor
+> Python segue para o próximo).
+
+#### O problema
+
+O broker distribui os pedidos dos bots entre os 4 servidores com round-robin. Até a parte 4
+cada servidor guardava só o que passou por ele, então cada um tinha um pedaço do histórico:
+a lista de canais mudava conforme o servidor que respondia (um bot via que o canal `jogos`
+não existia e, ao tentar criar, recebia `canal ja existe` de outro servidor) e, se um
+servidor parasse, aquele pedaço dos dados ficava inacessível. Na parte 5 todos os
+servidores precisam ter todos os dados.
+
+#### Método escolhido: escrita em todas as réplicas com consistência eventual
+
+Entre os métodos vistos em aula, usamos a **replicação ativa (escrita em todas as
+réplicas)**: não existe servidor principal, qualquer servidor aceita a escrita do bot e
+repassa essa escrita para todos os outros. Como os servidores recebem as cópias um pouco
+depois, a consistência é **eventual**: por um instante um servidor pode ainda não ter um
+dado novo, mas, sem novas escritas, todos chegam ao mesmo conjunto de dados.
+
+Esse método serve bem para o projeto porque os dados só crescem (logins, canais e mensagens
+nunca são alterados nem apagados). Então a ordem em que as cópias chegam não muda o
+resultado final, e não precisa de bloqueio nem de um coordenador para cada escrita. O
+coordenador eleito na parte 4 continua sendo usado só para o relógio. Se um servidor cair,
+os outros continuam aceitando escritas normalmente.
+
+#### Como foi implementado
+
+Cada dado gravado virou um **registro**: uma `Mensagem` com o pedido original do bot
+(`tipo` = `login`, `criar_canal` ou `publicar`, o bot no `remetente`, `timestamp`, `relogio`,
+`canal`, `conteudo`) e um `id` único (um uuid gerado pelo servidor que atendeu o bot).
+
+1. **Escrita**: o servidor que atende o bot grava o registro no disco e publica uma cópia
+   no tópico `replicacao` do proxy (o mesmo proxy do Pub/Sub, porta 5557):
+
+   ```
+   bot      -> servidor A : REQ publicar (canal, conteudo)
+   servidor A             : grava o registro (id novo)
+   servidor A -> PUB [replicacao] replicacao (historico = [registro])
+   servidor A -> bot      : REP ok
+   ```
+
+2. **Cópia**: todos os servidores assinam o tópico `replicacao`. Quem recebe grava o registro
+   se ainda não tiver aquele `id`. O próprio servidor também recebe a sua publicação, e o `id`
+   faz ela ser ignorada.
+3. **Recuperação**: o Pub/Sub não guarda mensagens antigas, então um servidor que estava
+   desligado (ou que acabou de ser adicionado) perderia o que aconteceu enquanto estava fora.
+   Por isso, quando um servidor liga, ele pede a lista de servidores para a referência e manda
+   `sincronizar` para cada um (porta 5560). A resposta traz todos os registros no campo
+   `historico`, e ele grava os que não tinha:
+
+   ```
+   servidor novo -> outro servidor : REQ sincronizar
+   outro servidor -> servidor novo : REP ok (historico = [todos os registros])
+   ```
+
+O servidor assina o tópico `replicacao` **antes** de pedir a sincronização, então uma escrita
+que acontecer no meio chega por um dos dois caminhos (ou pelos dois, e o `id` evita a
+duplicação). Pedir para todos os servidores, e não só para um, cobre o caso de dois
+servidores terem ficado fora em momentos diferentes.
+
+#### Mudanças que precisamos fazer no método
+
+- **Duplicatas**: como a cópia pode chegar mais de uma vez (pelo tópico e pela
+  sincronização), cada registro tem um `id`, e quem já tem o `id` ignora a cópia.
+- **Canal criado ao mesmo tempo em dois servidores**: dois bots podem criar o mesmo canal em
+  servidores diferentes antes da cópia chegar. O canal é identificado pelo nome, então os dois
+  registros ficam guardados (todos os servidores ficam com os mesmos dois), mas o canal aparece
+  uma vez só na lista.
+- **Ordem**: cada servidor pode receber as cópias numa ordem diferente, então a ordem das
+  linhas nos arquivos pode mudar de um servidor para outro. Cada registro guarda o relógio
+  lógico (Lamport) do pedido do bot, e a resposta do `sincronizar` manda os registros ordenados
+  por esse relógio (o `id` desempata). Assim o histórico sai na mesma ordem de qualquer
+  servidor que responder, sem depender do relógio físico.
+- **Servidor desligado**: em vez de guardar as cópias para quem está fora (o que o Pub/Sub
+  não faz), quem volta pede tudo com o `sincronizar` (transferência de estado).
+
+Dá para ver a replicação no log de qualquer servidor:
+
+```
+[servidor-py-1] gravei a replica de servidor-py-2: (login de bot-py-1 relogio=1 id=c92fd28e...)
+[servidor-py-3] sincronizei com servidor-py-1: 32 registros novos de 84
+```
 
 ## Estrutura de pastas
 

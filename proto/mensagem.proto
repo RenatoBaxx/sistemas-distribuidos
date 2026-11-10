@@ -6,7 +6,7 @@ message Mensagem {
   string tipo = 1;            // login, criar_canal, listar_canais...
   string remetente = 2;       // nome de quem enviou
   int64 timestamp = 3;        // hora do envio em milissegundos (unix)
-  int64 relogio = 4;          // relogio logico (vai ser usado na parte 3)
+  int64 relogio = 4;          // relogio logico (lamport) de quem enviou
   string status = 5;          // "ok" ou "erro" nas respostas
   string erro = 6;            // descricao do erro quando status = "erro"
   string canal = 7;           // nome do canal
@@ -17,6 +17,10 @@ message Mensagem {
   int32 rank = 10;                       // rank do servidor
   repeated InfoServidor servidores = 11; // servidores disponiveis
   int64 hora = 12;                       // hora usada para acertar o relogio fisico
+
+  // parte 5 (replicacao)
+  string id = 13;                   // id unico do registro, para o mesmo dado nao ser gravado duas vezes
+  repeated Mensagem historico = 14; // registros mandados na replicacao e na sincronizacao entre servidores
 }
 
 message InfoServidor {
