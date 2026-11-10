@@ -297,10 +297,6 @@ socket REQ novo e no Python o socket REQ é recriado quando estoura o tempo).
 
 ### Replicação (parte 5)
 
-> Em andamento: por enquanto a replicação está só no servidor Python. O servidor C# ainda
-> não assina o tópico `replicacao` nem responde o `sincronizar` (responde `erro`, e o servidor
-> Python segue para o próximo).
-
 #### O problema
 
 O broker distribui os pedidos dos bots entre os 4 servidores com round-robin. Até a parte 4

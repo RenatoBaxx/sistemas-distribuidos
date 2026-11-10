@@ -8,9 +8,17 @@ public class ChatServer
     private static readonly TimeSpan ReferenceTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan ServerTimeout = TimeSpan.FromSeconds(2);
 
+    // topicos do proxy usados entre os servidores (os bots nao podem usar como canal)
+    private static readonly string[] Reserved = { "servers", "replicacao" };
+
     private readonly string name;
     private readonly Storage storage = new Storage("dados");
-    private readonly List<string> channels;
+    private readonly List<string> channels = new List<string>();
+
+    // replicacao: todos os dados (logins, canais e mensagens), deste e dos outros servidores
+    private readonly List<Mensagem> records = new List<Mensagem>();
+    // replicacao: ids dos registros que ja estao gravados
+    private readonly HashSet<string> seen = new HashSet<string>();
 
     private int rank;
     private int clientMessages = 0;
@@ -25,17 +33,18 @@ public class ChatServer
     // mensagens publicadas nos canais e no topico servers (vao para o proxy)
     private readonly PublisherSocket publisher = new PublisherSocket();
 
-    // pedidos de outros servidores (eleicao e relogio)
+    // pedidos de outros servidores (eleicao, relogio e sincronizar)
     private readonly ResponseSocket servers = new ResponseSocket();
 
-    // avisos de novo coordenador (topico servers)
+    // avisos de novo coordenador (topico servers) e replicas dos outros servidores (topico replicacao)
     private readonly SubscriberSocket serversTopic = new SubscriberSocket();
 
     public ChatServer(string name)
     {
         this.name = name;
-        channels = storage.LoadChannels();
-        Log.Info($"{channels.Count} canais carregados do disco");
+        foreach (var record in storage.LoadAll())
+            Remember(record);
+        Log.Info($"{records.Count} registros e {channels.Count} canais carregados do disco");
     }
 
     public void Run()
@@ -48,14 +57,18 @@ public class ChatServer
 
         publisher.Connect("tcp://proxy:5557");
         serversTopic.Connect("tcp://proxy:5558");
-        serversTopic.Subscribe("servers");
+        foreach (var topic in Reserved)
+            serversTopic.Subscribe(topic);
         servers.Bind($"tcp://*:{ServersPort}");
 
         AskRank();
-        ShowServers();
+        var available = GetServers();
+        Log.Info($"servidores disponiveis: {string.Join(", ", available.Select(s => $"{s.Nome} (rank {s.Rank})"))}");
 
-        // espera o SUB do topico servers conectar no proxy antes da primeira eleicao
+        // espera o SUB dos topicos servers e replicacao conectar no proxy
         Thread.Sleep(1000);
+        // assina a replicacao antes de pedir os dados, entao nada se perde no meio (o id evita duplicar)
+        SyncData(available);
         StartElection();
 
         clients.Connect("tcp://broker:5556");
@@ -109,12 +122,6 @@ public class ChatServer
         return reply.Servidores.ToList();
     }
 
-    private void ShowServers()
-    {
-        var list = GetServers().Select(s => $"{s.Nome} (rank {s.Rank})");
-        Log.Info($"servidores disponiveis: {string.Join(", ", list)}");
-    }
-
     private void SendHeartbeat()
     {
         var reply = Net.Request(ReferenceAddress, NewMessage("heartbeat"), ReferenceTimeout);
@@ -161,6 +168,11 @@ public class ChatServer
     {
         var topic = serversTopic.ReceiveFrameString();
         var announcement = Net.Read(serversTopic.ReceiveFrameBytes());
+        if (topic == "replicacao" && announcement.Tipo == "replicacao")
+        {
+            ReceiveReplica(announcement);
+            return;
+        }
         if (topic != "servers" || announcement.Tipo != "coordenador")
             return;
 
@@ -185,6 +197,9 @@ public class ChatServer
                 break;
             case "relogio":
                 Net.Send(servers, AnswerClock(request));
+                break;
+            case "sincronizar":
+                Net.Send(servers, AnswerSync());
                 break;
             default:
                 Net.Send(servers, Error(request.Tipo, "nao conheco esse tipo de mensagem"));
@@ -244,6 +259,90 @@ public class ChatServer
         Log.Info($"relogio fisico ajustado em {diff} ms pelo coordenador {coordinator}");
     }
 
+    // ---------------- replicacao (escrita em todas as replicas) ----------------
+
+    private void Remember(Mensagem record)
+    {
+        records.Add(record);
+        if (record.Id != "")
+            seen.Add(record.Id);
+        // o canal e identificado pelo nome: se dois servidores criaram o mesmo canal ao mesmo tempo,
+        // os dois registros ficam guardados, mas o canal aparece uma vez so na lista
+        if (record.Tipo == "criar_canal" && !channels.Contains(record.Canal))
+            channels.Add(record.Canal);
+    }
+
+    // grava o registro se ele ainda nao existe aqui; devolve true se era novo
+    private bool Apply(Mensagem record)
+    {
+        if (record.Id == "" || seen.Contains(record.Id) || !Storage.IsRecordType(record.Tipo))
+            return false;
+        storage.Save(record);
+        Remember(record);
+        return true;
+    }
+
+    // manda o registro novo para todos os servidores pelo topico replicacao do proxy
+    private void Replicate(Mensagem record)
+    {
+        var envelope = NewMessage("replicacao");
+        envelope.Historico.Add(record);
+        Net.Publish(publisher, "replicacao", envelope);
+    }
+
+    private void ReceiveReplica(Mensagem envelope)
+    {
+        if (envelope.Remetente == name)
+            return; // a propria replica volta pelo SUB
+        foreach (var record in envelope.Historico)
+            if (Apply(record))
+                Log.Info($"gravei a replica de {envelope.Remetente}: {Log.DescribeRecord(record)}");
+    }
+
+    // quando o servidor liga ele pede tudo o que os outros tem (pode ter perdido coisas enquanto
+    // estava desligado e o pub/sub nao guarda mensagens antigas)
+    private void SyncData(List<InfoServidor> available)
+    {
+        var others = available.Where(s => s.Nome != name).ToList();
+        if (others.Count == 0)
+            Log.Info("nenhum outro servidor para sincronizar os dados");
+
+        foreach (var server in others)
+        {
+            var reply = Net.Request($"tcp://{server.Nome}:{ServersPort}", NewMessage("sincronizar"), ServerTimeout);
+            if (reply?.Status != "ok")
+            {
+                Log.Info($"{server.Nome} nao respondeu a sincronizacao");
+                continue;
+            }
+            int added = reply.Historico.Count(Apply);
+            Log.Info($"sincronizei com {server.Nome}: {added} registros novos de {reply.Historico.Count}");
+        }
+    }
+
+    // resposta do sincronizar: todos os registros, na ordem do relogio logico (o id desempata)
+    private Mensagem AnswerSync()
+    {
+        var reply = Ok("sincronizar");
+        reply.Historico.AddRange(records
+            .Where(r => r.Id != "")
+            .OrderBy(r => r.Relogio)
+            .ThenBy(r => r.Id, StringComparer.Ordinal));
+        return reply;
+    }
+
+    private static Mensagem NewRecord(string type, Mensagem request, long timestamp)
+    {
+        return new Mensagem
+        {
+            Tipo = type,
+            Remetente = request.Remetente,
+            Timestamp = timestamp,
+            Relogio = request.Relogio,
+            Id = Guid.NewGuid().ToString("N")
+        };
+    }
+
     // ---------------- pedidos dos bots ----------------
 
     private Mensagem Handle(Mensagem request)
@@ -263,7 +362,9 @@ public class ChatServer
         if (!IsValidName(request.Remetente))
             return Error("login", "nome de usuario invalido");
 
-        storage.SaveLogin(request.Remetente, Clock.Now());
+        var record = NewRecord("login", request, Clock.Now());
+        Apply(record);
+        Replicate(record);
         return Ok("login");
     }
 
@@ -273,13 +374,15 @@ public class ChatServer
 
         if (!IsValidName(channel))
             return Error("criar_canal", "nome de canal invalido");
-        if (channel == "servers")
-            return Error("criar_canal", "o canal servers e reservado");
+        if (Reserved.Contains(channel))
+            return Error("criar_canal", $"o canal {channel} e reservado");
         if (channels.Contains(channel))
             return Error("criar_canal", "esse canal ja existe");
 
-        channels.Add(channel);
-        storage.SaveChannel(channel, request.Remetente, Clock.Now());
+        var record = NewRecord("criar_canal", request, Clock.Now());
+        record.Canal = channel;
+        Apply(record);
+        Replicate(record);
 
         var reply = Ok("criar_canal");
         reply.Canal = channel;
@@ -293,10 +396,11 @@ public class ChatServer
         return reply;
     }
 
-    // nao confere se o canal esta na lista porque, com o round-robin, cada servidor so conhece parte dos canais
+    // nao confere se o canal esta na lista porque um canal criado agora em outro servidor
+    // pode ainda nao ter chegado aqui pela replicacao
     private Mensagem Publish(Mensagem request)
     {
-        if (!IsValidName(request.Canal) || request.Canal == "servers")
+        if (!IsValidName(request.Canal) || Reserved.Contains(request.Canal))
             return Error("publicar", "nome de canal invalido");
         if (string.IsNullOrWhiteSpace(request.Conteudo))
             return Error("publicar", "a mensagem esta vazia");
@@ -310,7 +414,11 @@ public class ChatServer
             Conteudo = request.Conteudo
         };
         Net.Publish(publisher, request.Canal, post);
-        storage.SaveMessage(request.Canal, request.Remetente, request.Conteudo, request.Timestamp, request.Relogio);
+        var record = NewRecord("publicar", request, request.Timestamp);
+        record.Canal = request.Canal;
+        record.Conteudo = request.Conteudo;
+        Apply(record);
+        Replicate(record);
 
         var reply = Ok("publicar");
         reply.Canal = request.Canal;

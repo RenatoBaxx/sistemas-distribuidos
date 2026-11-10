@@ -40,6 +40,22 @@ public static class Log
             sb.Append($" | servidores: [{string.Join(", ", m.Servidores.Select(s => $"{s.Nome}#{s.Rank}"))}]");
         if (m.Hora > 0)
             sb.Append($" | hora informada: {Clock.Format(m.Hora)}");
+        if (m.Historico.Count == 1)
+            sb.Append($" | registro: {DescribeRecord(m.Historico[0])}");
+        else if (m.Historico.Count > 1)
+            sb.Append($" | historico: {m.Historico.Count} registros");
+        return sb.ToString();
+    }
+
+    // um registro da replicacao (o pedido original do bot que foi gravado)
+    public static string DescribeRecord(Mensagem r)
+    {
+        var sb = new StringBuilder($"({r.Tipo} de {r.Remetente}");
+        if (r.Canal != "")
+            sb.Append($" canal: {r.Canal}");
+        if (r.Conteudo != "")
+            sb.Append($" texto: {r.Conteudo}");
+        sb.Append($" lamport: {r.Relogio} id: {r.Id})");
         return sb.ToString();
     }
 }
